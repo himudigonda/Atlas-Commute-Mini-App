@@ -1,10 +1,12 @@
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-import structlog
 
 from agents.scheduler.graph import SchedulerAgent
-from agents.scheduler.state import SchedulerState, CommutePlan
+from agents.scheduler.state import CommutePlan, SchedulerState
+from engine.telemetry.metrics import MetricKey, metrics
 
 logger = structlog.get_logger()
 
@@ -13,13 +15,17 @@ router = APIRouter(prefix="/v1", tags=["Commute Orchestrator"])
 # --- API Contracts (DTOs) ---
 # Separated from Internal State to allow independent evolution (Rule 17)
 
+
 class PlanRequest(BaseModel):
     query: str = Field(
-        ..., 
-        min_length=10, 
-        example="I need to get to JFK for flight BA112 from Brooklyn by 5pm"
+        ...,
+        min_length=10,
+        json_schema_extra={
+            "example": "I need to get to JFK for flight BA112 from Brooklyn by 5pm"
+        },
     )
-    user_id: str = Field(..., example="user_123")
+    user_id: str = Field(..., json_schema_extra={"example": "user_123"})
+
 
 class PlanResponse(BaseModel):
     success: bool
@@ -27,7 +33,9 @@ class PlanResponse(BaseModel):
     error: Optional[str] = None
     trace_id: str
 
+
 # --- Dependency Injection ---
+
 
 def get_agent() -> SchedulerAgent:
     """
@@ -36,23 +44,26 @@ def get_agent() -> SchedulerAgent:
     """
     return SchedulerAgent()
 
+
 # --- Endpoints ---
+
 
 @router.post(
     "/plan",
     response_model=PlanResponse,
     status_code=status.HTTP_200_OK,
-    summary="Generate a commute plan from natural language"
+    summary="Generate a commute plan from natural language",
 )
 async def generate_commute_plan(
-    request: PlanRequest,
-    agent: SchedulerAgent = Depends(get_agent)
+    request: PlanRequest, agent: SchedulerAgent = Depends(get_agent)
 ) -> PlanResponse:
     """
     Orchestrates the Commute Agent to analyze traffic and flight data.
     """
     log = logger.bind(user_id=request.user_id, route="plan")
     log.info("api.request_received", query=request.query)
+
+    await metrics.increment(MetricKey.REQUESTS_TOTAL)
 
     # 1. Initialize State
     initial_state = SchedulerState(
@@ -63,7 +74,7 @@ async def generate_commute_plan(
         plan=None,
         error_log=[],
         retry_count=0,
-        execution_trace=[]
+        execution_trace=[],
     )
 
     try:
@@ -72,28 +83,29 @@ async def generate_commute_plan(
 
         # 3. Handle Failure (Self-Healing exhausted)
         if not final_state.get("plan"):
+            await metrics.increment(MetricKey.REQUESTS_FAILED)
             error_msg = "Agent failed to generate a plan after retries."
             if final_state.get("error_log"):
                 error_msg = f"Agent Error: {final_state['error_log'][-1]}"
-            
+
             log.warning("api.agent_failure", error=error_msg)
             return PlanResponse(
                 success=False,
                 error=error_msg,
-                trace_id=request.user_id # Using user_id as trace for MVP
+                trace_id=request.user_id,  # Using user_id as trace for MVP
             )
 
         # 4. Success
+        await metrics.increment(MetricKey.REQUESTS_SUCCESS)
         log.info("api.success", action=final_state["plan"].recommended_action)
         return PlanResponse(
-            success=True,
-            plan=final_state["plan"],
-            trace_id=request.user_id
+            success=True, plan=final_state["plan"], trace_id=request.user_id
         )
 
     except Exception as e:
+        await metrics.increment(MetricKey.REQUESTS_FAILED)
         log.error("api.unhandled_exception", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal system error during planning."
+            detail="Internal system error during planning.",
         )
