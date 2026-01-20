@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Dict
+from typing import Any, Dict
 
 import structlog
 
@@ -15,6 +15,8 @@ class MetricKey(str, Enum):
     CACHE_HITS = "metrics:cache:hits"
     CACHE_MISSES = "metrics:cache:misses"
     TOKENS_USED = "metrics:tokens:total"
+    LATENCY_MS = "metrics:latency:last"
+    AGENT_LATENCY_MS = "metrics:latency:agent"
 
 
 class MetricsService:
@@ -32,6 +34,16 @@ class MetricsService:
             await redis_client.client.incrby(key.value, amount)
         except Exception as e:
             logger.warning("metrics.incr_failed", key=key, error=str(e))
+
+    async def set(self, key: MetricKey, value: Any) -> None:
+        """Set a specific metric value."""
+        if not redis_client.enabled:
+            return
+
+        try:
+            await redis_client.client.set(key.value, value)
+        except Exception as e:
+            logger.warning("metrics.set_failed", key=key, error=str(e))
 
     async def get_snapshot(self) -> Dict[str, int]:
         """Fetch all metrics for the dashboard."""

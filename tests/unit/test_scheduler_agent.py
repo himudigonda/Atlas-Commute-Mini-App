@@ -83,7 +83,9 @@ async def test_scheduler_agent_happy_path():
             "execution_trace": [],
         }
 
-        final_state = await agent.runner.ainvoke(initial_state)
+        from langchain_core.runnables import RunnableConfig
+
+        final_state = await agent.run(initial_state, config=RunnableConfig())
 
         # 4. Assertions
         assert final_state["user_context"].user_id == "u1"
@@ -163,7 +165,9 @@ async def test_self_healing_retry():
             "execution_trace": [],
         }
 
-        final_state = await agent.runner.ainvoke(initial_state)
+        from langchain_core.runnables import RunnableConfig
+
+        final_state = await agent.run(initial_state, config=RunnableConfig())
 
         # Should have succeeded eventually
         assert final_state["user_context"] is not None

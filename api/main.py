@@ -5,12 +5,13 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import commute, monitor, stats
 from engine.cache.redis_svc import redis_client
 from engine.telemetry.logger import setup_logging
+from engine.telemetry.metrics import MetricKey, metrics
 
 # 1. Setup Telemetry (Global)
 setup_logging(json_logs=False, log_level="INFO")
@@ -44,6 +45,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_latency_header(request: Request, call_next):
+    """Middleware to measure request latency."""
+    import time
+
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+
+    # Update latency metric in Redis (ms)
+    await metrics.set(MetricKey.LATENCY_MS, int(process_time * 1000))
+
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
 
 # 4. Register Routes
 app.include_router(commute.router)

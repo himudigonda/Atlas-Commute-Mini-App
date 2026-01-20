@@ -1,7 +1,9 @@
 import asyncio
+import time
 from typing import Any, Dict
 
 import structlog
+from langsmith import traceable
 
 from agents.scheduler.graph import SchedulerAgent
 from agents.scheduler.state import DecisionAction, SchedulerState, UserContext
@@ -39,15 +41,26 @@ def run_async_agent(context_data: Dict[str, Any]) -> Dict[str, Any]:
         config = RunnableConfig(
             run_name=f"WorkerPoll:{user_id}",
             tags=["worker", "proactive"],
+            metadata={"user_id": user_id, "client_id": "celery_worker"},
         )
 
+        from engine.telemetry.metrics import MetricKey, metrics
+
         # Invoke Graph
-        return await agent.runner.ainvoke(initial_state, config=config)
+        agent_start = time.time()
+        result = await agent.run(initial_state, config=config)
+        agent_latency = int((time.time() - agent_start) * 1000)
+
+        # Update agent-specific latency
+        await metrics.set(MetricKey.AGENT_LATENCY_MS, agent_latency)
+
+        return result
 
     return asyncio.run(_execute())
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@traceable(run_type="chain", name="Worker_MonitorCommute")
 def monitor_commute_task(self, user_context_json: Dict[str, Any]):
     """
     Background job:

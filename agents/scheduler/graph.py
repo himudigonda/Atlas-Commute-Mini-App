@@ -62,6 +62,19 @@ class SchedulerAgent:
 
         self.runner = workflow.compile()
 
+    @traceable(run_type="chain", name="SchedulerAgent.run")
+    async def run(
+        self, state: SchedulerState, config: RunnableConfig
+    ) -> Dict[str, Any]:
+        """Top-level agent execution with full tracing context."""
+        # Ensure user_id is in metadata for LangSmith
+        user_id = state.get("user_id", "unknown")
+        if not config.get("metadata"):
+            config["metadata"] = {}
+        config["metadata"]["user_id"] = user_id
+
+        return await self.runner.ainvoke(state, config=config)
+
     def _extract_content(self, msg) -> str:
         """Robustly extracts string content from a message, handling lists/parts."""
         content = getattr(msg, "content", "")

@@ -1,8 +1,10 @@
+import time
 from typing import Any, Dict, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from langchain_core.runnables import RunnableConfig
+from langsmith import traceable
 from pydantic import BaseModel, Field
 
 from agents.scheduler.graph import SchedulerAgent
@@ -55,6 +57,7 @@ def get_agent() -> SchedulerAgent:
     status_code=status.HTTP_200_OK,
     summary="Generate a commute plan from natural language",
 )
+@traceable(run_type="chain", name="API_GenerateCommutePlan")
 async def generate_commute_plan(
     request: PlanRequest, agent: SchedulerAgent = Depends(get_agent)
 ) -> PlanResponse:
@@ -84,8 +87,15 @@ async def generate_commute_plan(
         config = RunnableConfig(
             run_name=f"CommutePlan:{request.user_id}",
             tags=["api", "orchestrator"],
+            metadata={"user_id": request.user_id, "client_id": "fastapi"},
         )
-        final_state = await agent.runner.ainvoke(initial_state, config=config)
+
+        agent_start = time.time()
+        final_state = await agent.run(initial_state, config=config)
+        agent_latency = int((time.time() - agent_start) * 1000)
+
+        # Update agent-specific latency
+        await metrics.set(MetricKey.AGENT_LATENCY_MS, agent_latency)
 
         # 3. Handle Failure (Self-Healing exhausted)
         if not final_state.get("plan"):

@@ -47,23 +47,30 @@ class DashboardManager:
 
     def make_metrics_table(self) -> Panel:
         table = Table(box=box.SIMPLE_HEAD, expand=True)
-        table.add_column("System Metric", style="cyan")
+        table.add_column("Performance Metric", style="cyan")
         table.add_column("Current Value", justify="right", style="green bold")
 
+        # 1. High Priority "Live" Metrics
+        api_latency = self.metrics.get("latency:last", 0)
+        agent_latency = self.metrics.get("latency:agent", 0)
+        tokens = self.metrics.get("tokens:total", 0)
+
         table.add_row(
-            "API Gateway",
+            "Status: API Gateway",
             f"[bold {'green' if self.api_status == 'Online' else 'red'}]{self.api_status}[/]",
         )
+        table.add_row("Live: API Latency (ms)", f"[bold yellow]{api_latency}[/]")
+        table.add_row("Live: Agent Latency (ms)", f"[bold blue]{agent_latency}[/]")
+        table.add_row("Live: Tokens (Total)", f"[bold magenta]{tokens}[/]")
 
-        # Spacer
-        table.add_row("", "")
+        table.add_row("", "")  # Spacer
 
-        if self.metrics:
-            for k, v in self.metrics.items():
-                name = k.replace("_", " ").title()
-                table.add_row(name, str(v))
-        else:
-            table.add_row("[dim]Waiting for data...[/dim]", "")
+        # 2. General Counters
+        for k, v in self.metrics.items():
+            if k in ["latency:last", "latency:agent", "tokens:total"]:
+                continue
+            name = k.replace("_", " ").title()
+            table.add_row(name, str(v))
 
         return Panel(table, title="Live Performance Metrics", border_style="green")
 
