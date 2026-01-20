@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import commute, stats
+from api.routes import commute, monitor, stats
 from engine.cache.redis_svc import redis_client
 from engine.telemetry.logger import setup_logging
 
