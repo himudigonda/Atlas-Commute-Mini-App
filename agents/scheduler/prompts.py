@@ -8,8 +8,11 @@ CRITICAL: The current absolute time is {current_time}.
 Analyze the user's natural language input and extract specific entities into a strict JSON format.
 
 RULES:
-1. 'destination': Extract the city or airport the user is going to. DO NOT use the flight number as the destination.
-2. 'target_arrival_time': Calculate based on context if possible (relative to {current_time}), otherwise null.
+1. 'destination': Extract the city or airport the user is going to (e.g., "LAX", "San Francisco"). 
+   - CRITICAL: DO NOT use the flight number (e.g., UA123) as the destination. 
+   - If ONLY a flight number is given, set destination to "Airport".
+2. 'target_arrival_time': Calculate based on context (relative to {current_time}). 
+   - If user says "today at 11:00 PM", result must be {current_time} but at 23:00.
 3. 'flight_number': Regex match standard flight codes (e.g., UA123, AA450).
 4. 'origin': Extract where the user is starting from.
 

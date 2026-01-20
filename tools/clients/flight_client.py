@@ -55,19 +55,21 @@ class FlightClient:
             )
             data = json.loads(content)
 
-            # Rule: If target_date is provided, shift the mock data to that specific day
-            # but keep the time (hours/mins) from the mock file for consistency.
+            # Rule: If target_date is provided, shift the mock data to that specific moment.
+            # We prioritize the target_date (which captures user intent like "11:00 PM")
+            # over the mock's static time (e.g., 2:45 PM).
             if target_date:
-                sched = datetime.fromisoformat(data["scheduled_departure"])
-                est = datetime.fromisoformat(data["estimated_departure"])
+                sched_orig = datetime.fromisoformat(data["scheduled_departure"])
+                est_orig = datetime.fromisoformat(data["estimated_departure"])
 
-                data["scheduled_departure"] = target_date.replace(
-                    hour=sched.hour, minute=sched.minute, second=sched.second
-                ).isoformat()
+                # Calculate the delta between scheduled and estimated in the mock
+                delay_delta = est_orig - sched_orig
 
-                data["estimated_departure"] = target_date.replace(
-                    hour=est.hour, minute=est.minute, second=est.second
-                ).isoformat()
+                # Set new scheduled to the exact target_date
+                data["scheduled_departure"] = target_date.isoformat()
+
+                # Set new estimated to target_date + original delay
+                data["estimated_departure"] = (target_date + delay_delta).isoformat()
 
             # Override mock flight number to match request for realism
             data["flight_number"] = flight_number

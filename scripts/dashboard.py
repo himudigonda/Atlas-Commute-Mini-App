@@ -21,10 +21,11 @@ from engine.telemetry.time_utils import format_now
 API_URL = "http://localhost:8000/v1/stats"
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REFRESH_RATE = 0.5  # seconds
-MAX_LOGS = 20
+MAX_LOGS = 100
 
 console = Console()
 log_queue = deque(maxlen=MAX_LOGS)
+LOGS_PROCESSED = 0
 
 
 async def fetch_stats():
@@ -32,69 +33,78 @@ async def fetch_stats():
         try:
             response = await client.get(API_URL, timeout=0.5)
             if response.status_code == 200:
-                return response.json().get("metrics", {})
-            return {"error": f"Status {response.status_code}"}
+                stats = response.json().get("metrics", {})
+                stats["logs_processed"] = LOGS_PROCESSED
+                return stats
+            return {
+                "error": f"Status {response.status_code}",
+                "logs_processed": LOGS_PROCESSED,
+            }
         except Exception:
-            return {"error": "API Offline"}
+            return {"error": "API Offline", "logs_processed": LOGS_PROCESSED}
 
 
 async def log_subscriber():
-    """Background task to listen for logs from Redis."""
-    try:
-        r = redis.from_url(REDIS_URL, decode_responses=True)
-        pubsub = r.pubsub()
-        await pubsub.subscribe("atlas:logs")
+    """Background task to listen for logs from Redis with reconnection logic."""
+    global LOGS_PROCESSED
+    while True:
+        try:
+            r = redis.from_url(REDIS_URL, decode_responses=True)
+            pubsub = r.pubsub()
+            await pubsub.subscribe("atlas:logs")
+            log_queue.append(Text("Subscribed to atlas:logs", style="dim green"))
 
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                try:
-                    data = json.loads(message["data"])
-                    # Format: [timestamp] LEVEL - event
-                    ts = data.get("timestamp", "").split("T")[-1][:8]
-                    level = data.get("level", "info").upper()
-                    event = data.get("event", "")
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    LOGS_PROCESSED += 1
+                    try:
+                        data = json.loads(message["data"])
+                        # Format: [timestamp] LEVEL - event
+                        ts = data.get("timestamp", "").split("T")[-1][:8]
+                        level = data.get("level", "info").upper()
+                        event = data.get("event", "")
 
-                    color = "cyan"
-                    if level == "ERROR":
-                        color = "red"
-                    elif level == "WARNING":
-                        color = "yellow"
+                        color = "cyan"
+                        if level == "ERROR":
+                            color = "red"
+                        elif level == "WARNING":
+                            color = "yellow"
 
-                    # SPECIAL RENDERING: Thinking/Saying Boxes
-                    if event in ["agent.thinking", "agent.saying"]:
-                        node = data.get("node", "unknown").upper()
-                        is_thinking = event == "agent.thinking"
-                        icon = "🧠" if is_thinking else "💬"
-                        title = f"{icon} Agent {node} | {'Thinking' if is_thinking else 'Saying'}"
-                        border = "blue" if is_thinking else "magenta"
+                        # SPECIAL RENDERING: Thinking/Saying Boxes
+                        if event in ["agent.thinking", "agent.saying"]:
+                            node = data.get("node", "unknown").upper()
+                            is_thinking = event == "agent.thinking"
+                            icon = "🧠" if is_thinking else "💬"
+                            title = f"{icon} Agent {node} | {'Thinking' if is_thinking else 'Saying'}"
+                            border = "blue" if is_thinking else "magenta"
 
-                        # Extract content
-                        content = ""
-                        if is_thinking:
-                            content = data.get("anchor", "")
+                            # Extract content
+                            if is_thinking:
+                                content = data.get("anchor", "")
+                            else:
+                                content = json.dumps(data.get("result", {}), indent=2)
+
+                            # Create boxed log
+                            panel = Panel(
+                                Text(content, style="white"),
+                                title=title,
+                                border_style=border,
+                                box=box.ROUNDED,
+                                expand=False,
+                            )
+                            log_queue.append(panel)
                         else:
-                            content = json.dumps(data.get("result", {}), indent=2)
-
-                        # Create boxed log
-                        panel = Panel(
-                            Text(content, style="white"),
-                            title=title,
-                            border_style=border,
-                            box=box.ROUNDED,
-                            expand=False,
-                        )
-                        log_queue.append(panel)
-                    else:
-                        # STANDARD LOG LINE
-                        log_text = Text()
-                        log_text.append(f"[{ts}] ", style="dim")
-                        log_text.append(f"{level:7}", style=f"bold {color}")
-                        log_text.append(f" {event}")
-                        log_queue.append(log_text)
-                except Exception:
-                    pass
-    except Exception as e:
-        log_queue.append(Text(f"Log Subscriber Error: {str(e)}", style="red"))
+                            # STANDARD LOG LINE
+                            log_text = Text()
+                            log_text.append(f"[{ts}] ", style="dim")
+                            log_text.append(f"{level:7}", style=f"bold {color}")
+                            log_text.append(f" {event}")
+                            log_queue.append(log_text)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log_queue.append(Text(f"Connection Lost: {str(e)}", style="bold red"))
+            await asyncio.sleep(2)  # Backoff before reconnect
 
 
 def make_header() -> Panel:
@@ -114,10 +124,13 @@ def make_metrics_table(stats: dict) -> Panel:
     table.add_column("Metric", style="cyan")
     table.add_column("Value", justify="right", style="green bold")
 
-    if "error" in stats:
-        table.add_row("Status", "[red]OFFLINE[/red]")
+    if stats.get("error") == "API Offline":
+        table.add_row("Status", "[red]API OFFLINE[/red]")
+        table.add_row("Logs RX", str(stats.get("logs_processed", 0)))
     else:
         for k, v in stats.items():
+            if k == "error":
+                continue
             name = k.replace("_", " ").title()
             table.add_row(name, str(v))
 
