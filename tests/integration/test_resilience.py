@@ -1,6 +1,8 @@
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.runnables import RunnableConfig
 
 from agents.scheduler.graph import SchedulerAgent
 from agents.scheduler.state import FlightStatus, TrafficStatus, UserContext
@@ -20,25 +22,34 @@ async def test_llm_malformed_json_self_healing():
 
         agent = SchedulerAgent()
 
-        # Mock for token tracking call (first ainvoke)
-        mock_response = MagicMock()
-        mock_response.response_metadata = {"usage": {"total_tokens": 10}}
-        mock_model.ainvoke = AsyncMock(return_value=mock_response)
+        # Mock side effects for ainvoke
+        msg_fail = MagicMock()
+        msg_fail.content = "Not JSON"
 
-        # Mock for structured output (with_structured_output call)
-        mock_structured = AsyncMock()
-        mock_structured.side_effect = [
-            Exception("Output: 'invalid' is not valid JSON"),
-            UserContext(
-                user_id="u1", origin="A", destination="B", flight_number="UA123"
-            ),
-        ]
-        mock_model.with_structured_output.return_value.ainvoke = mock_structured
+        msg_ok = MagicMock()
+        msg_ok.content = json.dumps(
+            {
+                "user_id": "u1",
+                "origin": "A",
+                "destination": "B",
+                "flight_number": "UA123",
+            }
+        )
+        msg_ok.response_metadata = {"usage": {"total_tokens": 10}}
 
-        state = {"raw_query": "Need to go", "retry_count": 0, "error_log": []}
+        mock_model.ainvoke = AsyncMock(side_effect=[msg_fail, msg_ok])
+
+        state = {
+            "user_id": "u1",
+            "raw_query": "Need to go",
+            "retry_count": 0,
+            "error_log": [],
+        }
+
+        config = RunnableConfig(run_name="test")
 
         # Run node directly
-        result = await agent.node_classify(state)
+        result = await agent.node_classify(state, config=config)
 
         # Since it failed first, it should return incremented retry_count
         assert result["retry_count"] == 1
@@ -66,5 +77,7 @@ async def test_tool_failure_graceful_degradation():
                 "raw_query": "check traffic",
             }
             # The node_fetch_context should catch this
-            result = await agent.node_fetch_context(state)
+            result = await agent.node_fetch_context(
+                state, config=RunnableConfig(run_name="test")
+            )
             assert "Tool Failure: API Down" in result["error_log"][0]

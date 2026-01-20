@@ -16,21 +16,21 @@ async def test_end_to_end_flow():
     """
 
     # 1. Setup Mocks for the Heavy Lifting (LLM)
-    mock_context = UserContext(
-        user_id="e2e_user",
-        origin="Downtown",
-        destination="JFK",
-        flight_number="UA100",
-        target_arrival_time=None,
-    )
+    mock_context_json = {
+        "user_id": "e2e_user",
+        "origin": "Downtown",
+        "destination": "JFK",
+        "flight_number": "UA100",
+        "target_arrival_time": None,
+    }
 
-    mock_plan = CommutePlan(
-        metrics_analyzed=True,
-        buffer_minutes_remaining=20,
-        recommended_action=DecisionAction.NUDGE_LEAVE_NOW,
-        reasoning_trace="Traffic spike detected.",
-        notification_message="Leave NOW.",
-    )
+    mock_plan_json = {
+        "metrics_analyzed": True,
+        "buffer_minutes_remaining": 20,
+        "recommended_action": "nudge_leave_now",
+        "reasoning_trace": "Traffic spike detected.",
+        "notification_message": "Leave NOW.",
+    }
 
     # Patch the Factory to return mocks
     with (
@@ -38,25 +38,24 @@ async def test_end_to_end_flow():
         patch("agents.factory.ModelFactory.get_pro") as mock_pro,
     ):
 
-        # Mock Model instance
+        # Mock Model instances
         fast_instance = MagicMock()
         pro_instance = MagicMock()
         mock_fast.return_value = fast_instance
         mock_pro.return_value = pro_instance
 
-        # Mock ainvoke for token tracking
-        mock_response = MagicMock()
-        mock_response.response_metadata = {"usage": {"total_tokens": 10}}
-        fast_instance.ainvoke = AsyncMock(return_value=mock_response)
-        pro_instance.ainvoke = AsyncMock(return_value=mock_response)
+        # Mock ainvoke for raw text responses
+        import json
 
-        # Mock structured output
-        fast_instance.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=mock_context
-        )
-        pro_instance.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=mock_plan
-        )
+        mock_fast_msg = MagicMock()
+        mock_fast_msg.content = json.dumps(mock_context_json)
+        mock_fast_msg.response_metadata = {"usage": {"total_tokens": 10}}
+        fast_instance.ainvoke = AsyncMock(return_value=mock_fast_msg)
+
+        mock_pro_msg = MagicMock()
+        mock_pro_msg.content = json.dumps(mock_plan_json)
+        mock_pro_msg.response_metadata = {"usage": {"total_tokens": 15}}
+        pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 
         # 2. Execute Request
         payload = {"query": "Traffic check for UA100", "user_id": "test_e2e"}

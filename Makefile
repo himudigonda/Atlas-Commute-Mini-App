@@ -16,7 +16,7 @@ dev: ## Run local development server
 	uv run uvicorn api.main:app --reload --port 8000
 
 dashboard: ## Launch the terminal observability dashboard
-	uv run python scripts/dashboard.py
+	PYTHONPATH=. uv run python scripts/dashboard.py
 
 # --- Quality ---
 lint: ## Run ruff and mypy
@@ -47,6 +47,10 @@ docker-up: docker-build ## Launch the full stack (Redis + Atlas) using a dedicat
 		--network $(NETWORK_NAME) \
 		$$( [ -f .env ] && echo "--env-file .env" ) \
 		$$( [ -n "$(GOOGLE_API_KEY)" ] && echo "-e GOOGLE_API_KEY=$(GOOGLE_API_KEY)" ) \
+		-e LANGCHAIN_TRACING_V2=$(LANGCHAIN_TRACING_V2) \
+		-e LANGCHAIN_ENDPOINT=$(LANGCHAIN_ENDPOINT) \
+		-e LANGCHAIN_API_KEY=$(LANGCHAIN_API_KEY) \
+		-e LANGCHAIN_PROJECT=$(LANGCHAIN_PROJECT) \
 		-e REDIS_URL=redis://$(REDIS_CONTAINER):6379/0 \
 		$(IMAGE_NAME)
 

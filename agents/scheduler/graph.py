@@ -17,6 +17,8 @@ from agents.scheduler.state import (
     TrafficMetrics,
     UserContext,
 )
+from engine.telemetry.logger import console
+from engine.telemetry.time_utils import format_now, get_now, to_local
 from tools.clients.flight_client import FlightClient
 from tools.clients.traffic_client import TrafficClient
 
@@ -59,21 +61,42 @@ class SchedulerAgent:
 
         self.runner = workflow.compile()
 
+    def _extract_content(self, msg) -> str:
+        """Robustly extracts string content from a message, handling lists/parts."""
+        content = getattr(msg, "content", "")
+        if not content:
+            return ""
+        if isinstance(content, list):
+            # Flatten list of dicts/strings (common in some Gemini response formats)
+            parts = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and "text" in part:
+                    parts.append(part["text"])
+            return "".join(parts).strip()
+        return str(content).strip()
+
     # --- NODE 1: Classify (Flash) ---
-    async def node_classify(self, state: SchedulerState) -> Dict[str, Any]:
+    async def node_classify(
+        self, state: SchedulerState, config: RunnableConfig
+    ) -> Dict[str, Any]:
         """Extracts intent from raw query using Gemini Flash."""
         logger.info("agent.node.classify")
         from engine.telemetry.metrics import MetricKey, metrics
 
         try:
-            # Prepare Prompt
-            prompt = CLASSIFIER_SYSTEM.format(current_time=datetime.now().isoformat())
+            now_str = format_now()
+            prompt = CLASSIFIER_SYSTEM.format(current_time=now_str)
+            temporal_anchor = f"[TEMPORAL ANCHOR: {now_str}]"
+
             messages = [
                 SystemMessage(content=prompt),
-                HumanMessage(content=state.get("raw_query", "Evaluate my commute.")),
+                HumanMessage(
+                    content=f"{temporal_anchor}\nUser Input: {state.get('raw_query')}\n\nRESPONSE FORMAT: Strictly output valid raw JSON."
+                ),
             ]
 
-            # Inject Error Context if Retrying
             if state.get("error_log"):
                 messages.append(
                     HumanMessage(
@@ -81,19 +104,38 @@ class SchedulerAgent:
                     )
                 )
 
-            # Call Model and track tokens (Flash is cheap, double-calling for simplicity/Pydantic validation)
-            response = await self.flash_model.ainvoke(messages)
-            usage = response.response_metadata.get("usage", {})
-            await metrics.increment(MetricKey.TOKENS_USED, usage.get("total_tokens", 0))
+            logger.debug("agent.thinking", node="classify", anchor=temporal_anchor)
 
-            # Parse structured output
-            extractor = self.flash_model.with_structured_output(UserContext)
-            result = await extractor.ainvoke(messages)
+            # We use a plain .ainvoke and manual parse for hyper-stability.
+            raw_msg = await self.flash_model.ainvoke(messages, config=config)
+            content = self._extract_content(raw_msg)
 
-            return {
-                "user_context": result,
-                "retry_count": 0,  # Reset on success
-            }
+            # Manual JSON Extraction Logic (Regex for robustness)
+            import re
+
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = content
+
+            import json
+
+            result = UserContext.model_validate(json.loads(json_str))
+
+            # DEFENSIVE: Ensure user_id is preserved from state if LLM omits it
+            if not result.user_id:
+                result.user_id = state.get("user_id")
+
+            logger.info("agent.saying", node="classify", result=result.model_dump())
+
+            if hasattr(raw_msg, "response_metadata"):
+                usage = raw_msg.response_metadata.get("usage", {})
+                await metrics.increment(
+                    MetricKey.TOKENS_USED, usage.get("total_tokens", 0)
+                )
+
+            return {"user_context": result, "retry_count": 0}
 
         except Exception as e:
             logger.warning("agent.classify.failed", error=str(e))
@@ -103,7 +145,9 @@ class SchedulerAgent:
             }
 
     # --- NODE 2: Fetch Context (Parallel Tools) ---
-    async def node_fetch_context(self, state: SchedulerState) -> Dict[str, Any]:
+    async def node_fetch_context(
+        self, state: SchedulerState, config: RunnableConfig
+    ) -> Dict[str, Any]:
         """Executes Traffic and Flight tools in parallel."""
         logger.info("agent.node.fetch")
         ctx = state["user_context"]
@@ -116,7 +160,9 @@ class SchedulerAgent:
         try:
             # Asyncio Gather for parallelism (Rule IV)
             t_task = self.traffic_tool.get_travel_time(origin, destination)
-            f_task = self.flight_tool.get_status(flight_num)
+            f_task = self.flight_tool.get_status(
+                flight_num, target_date=ctx.target_arrival_time
+            )
 
             traffic, flight = await asyncio.gather(t_task, f_task)
 
@@ -128,7 +174,9 @@ class SchedulerAgent:
             return {"error_log": [f"Tool Failure: {str(e)}"]}
 
     # --- NODE 3: Reason (Pro) ---
-    async def node_reason(self, state: SchedulerState) -> Dict[str, Any]:
+    async def node_reason(
+        self, state: SchedulerState, config: RunnableConfig
+    ) -> Dict[str, Any]:
         """Decides action using Gemini Pro."""
         logger.info("agent.node.reason")
         from engine.telemetry.metrics import MetricKey, metrics
@@ -144,10 +192,11 @@ class SchedulerAgent:
             flight = state.get("flight_data") or FlightMetrics(
                 flight_number="N/A",
                 status="on_time",
-                scheduled_departure=datetime.now(),
-                estimated_departure=datetime.now(),
+                scheduled_departure=get_now(),
+                estimated_departure=get_now(),
             )
 
+            now_str = format_now()
             prompt = REASONER_SYSTEM.format(
                 traffic_status=(
                     traffic.status.value
@@ -160,18 +209,21 @@ class SchedulerAgent:
                     if hasattr(flight.status, "value")
                     else flight.status
                 ),
-                flight_time=flight.estimated_departure.isoformat(),
-                current_time=datetime.now().isoformat(),
+                flight_time=to_local(flight.estimated_departure).isoformat(),
+                current_time=now_str,
+            )
+
+            temporal_anchor = (
+                f"[TEMPORAL ANCHOR: The absolute current time is {now_str}]"
             )
 
             messages = [
                 SystemMessage(content=prompt),
                 HumanMessage(
-                    content="Analyze the provided logistics context and generate a commute plan."
+                    content=f"{temporal_anchor}\nFinal logistics analysis. Provide commute plan in raw JSON format."
                 ),
             ]
 
-            # Inject Error Context if Retrying
             if state.get("error_log") and state.get("retry_count", 0) > 0:
                 messages.append(
                     HumanMessage(
@@ -179,14 +231,31 @@ class SchedulerAgent:
                     )
                 )
 
-            # Call Model and track tokens
-            response = await self.pro_model.ainvoke(messages)
-            usage = response.response_metadata.get("usage", {})
-            await metrics.increment(MetricKey.TOKENS_USED, usage.get("total_tokens", 0))
+            logger.debug("agent.thinking", node="reason", anchor=temporal_anchor)
 
-            # Call Model for structured output
-            reasoner = self.pro_model.with_structured_output(CommutePlan)
-            plan = await reasoner.ainvoke(messages)
+            # Manual JSON Strategy
+            raw_msg = await self.pro_model.ainvoke(messages, config=config)
+            content = self._extract_content(raw_msg)
+
+            import re
+
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = content
+
+            import json
+
+            plan = CommutePlan.model_validate(json.loads(json_str))
+
+            logger.info("agent.saying", node="reason", result=plan.model_dump())
+
+            if hasattr(raw_msg, "response_metadata"):
+                usage = raw_msg.response_metadata.get("usage", {})
+                await metrics.increment(
+                    MetricKey.TOKENS_USED, usage.get("total_tokens", 0)
+                )
 
             return {"plan": plan, "retry_count": 0}
 

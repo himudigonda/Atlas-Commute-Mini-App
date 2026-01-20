@@ -67,6 +67,7 @@ async def generate_commute_plan(
 
     # 1. Initialize State
     initial_state = SchedulerState(
+        user_id=request.user_id,
         raw_query=request.query,
         user_context=None,
         traffic_data=None,
@@ -79,7 +80,11 @@ async def generate_commute_plan(
 
     try:
         # 2. Invoke Agent (Async)
-        final_state = await agent.runner.ainvoke(initial_state)
+        config = {
+            "run_name": f"CommutePlan:{request.user_id}",
+            "tags": ["api", "orchestrator"],
+        }
+        final_state = await agent.runner.ainvoke(initial_state, config=config)
 
         # 3. Handle Failure (Self-Healing exhausted)
         if not final_state.get("plan"):

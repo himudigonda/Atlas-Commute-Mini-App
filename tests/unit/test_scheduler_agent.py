@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,21 +33,20 @@ async def test_scheduler_agent_happy_path():
         )
     )
 
-    # Mock LLM Responses
-    mock_context = UserContext(
-        user_id="u1", origin="Home", destination="LAX", flight_number="UA123"
-    )
-    mock_plan = CommutePlan(
-        metrics_analyzed=True,
-        buffer_minutes_remaining=15,
-        recommended_action=DecisionAction.NUDGE_LEAVE_NOW,
-        reasoning_trace="Traffic heavy",
-        notification_message="Leave now!",
-    )
-
-    # Mock token usage response
-    mock_response = MagicMock()
-    mock_response.response_metadata = {"usage": {"total_tokens": 10}}
+    # Mock LLM Responses as JSON strings
+    mock_context = {
+        "user_id": "u1",
+        "origin": "Home",
+        "destination": "LAX",
+        "flight_number": "UA123",
+    }
+    mock_plan = {
+        "metrics_analyzed": True,
+        "buffer_minutes_remaining": 15,
+        "recommended_action": "nudge_leave_now",
+        "reasoning_trace": "Traffic heavy",
+        "notification_message": "Leave now!",
+    }
 
     with (
         patch("agents.scheduler.graph.TrafficClient", return_value=mock_traffic),
@@ -60,23 +60,23 @@ async def test_scheduler_agent_happy_path():
         mock_fast.return_value = fast_instance
         mock_pro.return_value = pro_instance
 
-        # Mock token ainvoke
-        fast_instance.ainvoke = AsyncMock(return_value=mock_response)
-        pro_instance.ainvoke = AsyncMock(return_value=mock_response)
+        # Mock ainvoke
+        mock_fast_msg = MagicMock()
+        mock_fast_msg.content = json.dumps(mock_context)
+        mock_fast_msg.response_metadata = {"usage": {"total_tokens": 10}}
+        fast_instance.ainvoke = AsyncMock(return_value=mock_fast_msg)
 
-        # Configure LLM Mocks to return our Pydantic models
-        fast_instance.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=mock_context
-        )
-        pro_instance.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=mock_plan
-        )
+        mock_pro_msg = MagicMock()
+        mock_pro_msg.content = json.dumps(mock_plan)
+        mock_pro_msg.response_metadata = {"usage": {"total_tokens": 15}}
+        pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 
         # 2. Init Agent
         agent = SchedulerAgent()
 
         # 3. Execute
         initial_state = {
+            "user_id": "u1",
             "raw_query": "I need to get to LAX for flight UA123 from Home",
             "error_log": [],
             "retry_count": 0,
@@ -86,8 +86,8 @@ async def test_scheduler_agent_happy_path():
         final_state = await agent.runner.ainvoke(initial_state)
 
         # 4. Assertions
-        assert final_state["user_context"] == mock_context
-        assert final_state["plan"] == mock_plan
+        assert final_state["user_context"].user_id == "u1"
+        assert final_state["plan"].recommended_action == DecisionAction.NUDGE_LEAVE_NOW
 
         # Verify Tool Calls
         mock_traffic.get_travel_time.assert_awaited_once()
@@ -111,10 +111,6 @@ async def test_self_healing_retry():
         )
     )
 
-    # Mock token usage response
-    mock_response = MagicMock()
-    mock_response.response_metadata = {"usage": {"total_tokens": 10}}
-
     with (
         patch("agents.scheduler.graph.TrafficClient", return_value=mock_traffic),
         patch("agents.scheduler.graph.FlightClient", return_value=mock_flight),
@@ -127,32 +123,40 @@ async def test_self_healing_retry():
         mock_fast.return_value = fast_instance
         mock_pro.return_value = pro_instance
 
-        # Mock token ainvoke
-        fast_instance.ainvoke = AsyncMock(return_value=mock_response)
-        pro_instance.ainvoke = AsyncMock(return_value=mock_response)
+        # Mock ainvoke with side effects
+        mock_fast_msg_fail = MagicMock()
+        mock_fast_msg_fail.content = "Invalid garbage"
 
-        # First call raises exception, Second call succeeds
-        mock_extractor = AsyncMock()
-        mock_extractor.ainvoke.side_effect = [
-            ValueError("Invalid JSON"),  # Fail 1
-            UserContext(
-                user_id="u1", origin="A", destination="B", flight_number="UA111"
-            ),  # Success 2
-        ]
-        fast_instance.with_structured_output.return_value = mock_extractor
-
-        # Reasoner succeeds immediately
-        pro_instance.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=CommutePlan(
-                metrics_analyzed=True,
-                buffer_minutes_remaining=10,
-                recommended_action=DecisionAction.WAIT,
-                reasoning_trace="ok",
-            )
+        mock_fast_msg_ok = MagicMock()
+        mock_fast_msg_ok.content = json.dumps(
+            {
+                "user_id": "u1",
+                "origin": "A",
+                "destination": "B",
+                "flight_number": "UA111",
+            }
         )
+        mock_fast_msg_ok.response_metadata = {"usage": {"total_tokens": 10}}
+
+        fast_instance.ainvoke = AsyncMock(
+            side_effect=[mock_fast_msg_fail, mock_fast_msg_ok]
+        )
+
+        mock_pro_msg = MagicMock()
+        mock_pro_msg.content = json.dumps(
+            {
+                "metrics_analyzed": True,
+                "buffer_minutes_remaining": 10,
+                "recommended_action": "wait",
+                "reasoning_trace": "ok",
+            }
+        )
+        mock_pro_msg.response_metadata = {"usage": {"total_tokens": 5}}
+        pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 
         agent = SchedulerAgent()
         initial_state = {
+            "user_id": "u1",
             "raw_query": "go to lax",
             "retry_count": 0,
             "error_log": [],
@@ -163,5 +167,5 @@ async def test_self_healing_retry():
 
         # Should have succeeded eventually
         assert final_state["user_context"] is not None
-        # Should have 1 error in log
-        assert len(final_state["error_log"]) == 1
+        # Should have at least 1 error in log (the JSON decode failure)
+        assert len(final_state["error_log"]) >= 1

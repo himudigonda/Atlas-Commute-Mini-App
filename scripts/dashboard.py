@@ -15,6 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from engine.telemetry.time_utils import format_now
+
 # Configuration
 API_URL = "http://localhost:8000/v1/stats"
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -58,12 +60,37 @@ async def log_subscriber():
                     elif level == "WARNING":
                         color = "yellow"
 
-                    log_text = Text()
-                    log_text.append(f"[{ts}] ", style="dim")
-                    log_text.append(f"{level:7}", style=f"bold {color}")
-                    log_text.append(f" {event}")
+                    # SPECIAL RENDERING: Thinking/Saying Boxes
+                    if event in ["agent.thinking", "agent.saying"]:
+                        node = data.get("node", "unknown").upper()
+                        is_thinking = event == "agent.thinking"
+                        icon = "🧠" if is_thinking else "💬"
+                        title = f"{icon} Agent {node} | {'Thinking' if is_thinking else 'Saying'}"
+                        border = "blue" if is_thinking else "magenta"
 
-                    log_queue.append(log_text)
+                        # Extract content
+                        content = ""
+                        if is_thinking:
+                            content = data.get("anchor", "")
+                        else:
+                            content = json.dumps(data.get("result", {}), indent=2)
+
+                        # Create boxed log
+                        panel = Panel(
+                            Text(content, style="white"),
+                            title=title,
+                            border_style=border,
+                            box=box.ROUNDED,
+                            expand=False,
+                        )
+                        log_queue.append(panel)
+                    else:
+                        # STANDARD LOG LINE
+                        log_text = Text()
+                        log_text.append(f"[{ts}] ", style="dim")
+                        log_text.append(f"{level:7}", style=f"bold {color}")
+                        log_text.append(f" {event}")
+                        log_queue.append(log_text)
                 except Exception:
                     pass
     except Exception as e:
@@ -76,7 +103,7 @@ def make_header() -> Panel:
     grid.add_column(justify="right")
 
     title = Text("Atlas Orchestrator // Live Control", style="bold white on blue")
-    timestamp = Text(datetime.now().strftime("%H:%M:%S"), style="dim white")
+    timestamp = Text(format_now(), style="dim white")
 
     grid.add_row(title, timestamp)
     return Panel(grid, style="white on blue")
@@ -98,12 +125,14 @@ def make_metrics_table(stats: dict) -> Panel:
 
 
 def make_log_panel() -> Panel:
-    log_content = Text()
-    for entry in log_queue:
-        log_content.append(entry)
-        log_content.append("\n")
+    # If the queue has Panels, they will be rendered as strings or we handle carefully
+    # actually rich handles it if we append correctly, but the queue has mixture of Text and Panel
+    # Let's iterate and build a Group if needed, but Panel expects a Renderable
+    from rich.console import Group
 
-    return Panel(log_content, title="Live Agent Logs", border_style="yellow")
+    return Panel(
+        Group(*list(log_queue)), title="Live Agent Logs", border_style="yellow"
+    )
 
 
 def make_layout() -> Layout:

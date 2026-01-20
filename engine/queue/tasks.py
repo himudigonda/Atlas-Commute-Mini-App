@@ -20,9 +20,11 @@ def run_async_agent(context_data: Dict[str, Any]) -> Dict[str, Any]:
 
         # Hydrate State from Payload
         user_context = UserContext(**context_data)
+        user_id = context_data.get("user_id", "unknown_user")
 
         initial_state = SchedulerState(
-            raw_query="BACKGROUND_POLL",  # Placeholder
+            user_id=user_id,
+            raw_query="BACKGROUND_POLL",
             user_context=user_context,
             traffic_data=None,
             flight_data=None,
@@ -32,8 +34,15 @@ def run_async_agent(context_data: Dict[str, Any]) -> Dict[str, Any]:
             execution_trace=[],
         )
 
+        from langchain_core.runnables import RunnableConfig
+
+        config = RunnableConfig(
+            run_name=f"WorkerPoll:{user_id}",
+            tags=["worker", "proactive"],
+        )
+
         # Invoke Graph
-        return await agent.runner.ainvoke(initial_state)
+        return await agent.runner.ainvoke(initial_state, config=config)
 
     return asyncio.run(_execute())
 
