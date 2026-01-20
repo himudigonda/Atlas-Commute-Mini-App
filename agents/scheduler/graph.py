@@ -68,7 +68,10 @@ class SchedulerAgent:
         try:
             # Prepare Prompt
             prompt = CLASSIFIER_SYSTEM.format(current_time=datetime.now().isoformat())
-            messages = [SystemMessage(content=prompt)]
+            messages = [
+                SystemMessage(content=prompt),
+                HumanMessage(content=state.get("raw_query", "Evaluate my commute.")),
+            ]
 
             # Inject Error Context if Retrying
             if state.get("error_log"):
@@ -78,18 +81,19 @@ class SchedulerAgent:
                     )
                 )
 
-            messages.append(HumanMessage(content=state["raw_query"]))
-
-            # Call Model and track tokens
+            # Call Model and track tokens (Flash is cheap, double-calling for simplicity/Pydantic validation)
             response = await self.flash_model.ainvoke(messages)
             usage = response.response_metadata.get("usage", {})
             await metrics.increment(MetricKey.TOKENS_USED, usage.get("total_tokens", 0))
 
-            # Parse structured output (Gemini handles JSON mode internally)
+            # Parse structured output
             extractor = self.flash_model.with_structured_output(UserContext)
             result = await extractor.ainvoke(messages)
 
-            return {"user_context": result, "retry_count": 0}  # Reset on success
+            return {
+                "user_context": result,
+                "retry_count": 0,  # Reset on success
+            }
 
         except Exception as e:
             logger.warning("agent.classify.failed", error=str(e))
@@ -104,10 +108,15 @@ class SchedulerAgent:
         logger.info("agent.node.fetch")
         ctx = state["user_context"]
 
+        # Safety: Ensure origin/destination are strings
+        origin = ctx.origin or "Current Location"
+        destination = ctx.destination or "Airport"
+        flight_num = ctx.flight_number or "UA1"
+
         try:
             # Asyncio Gather for parallelism (Rule IV)
-            t_task = self.traffic_tool.get_travel_time(ctx.origin, ctx.destination)
-            f_task = self.flight_tool.get_status(ctx.flight_number)
+            t_task = self.traffic_tool.get_travel_time(origin, destination)
+            f_task = self.flight_tool.get_status(flight_num)
 
             traffic, flight = await asyncio.gather(t_task, f_task)
 
@@ -155,7 +164,12 @@ class SchedulerAgent:
                 current_time=datetime.now().isoformat(),
             )
 
-            messages = [SystemMessage(content=prompt)]
+            messages = [
+                SystemMessage(content=prompt),
+                HumanMessage(
+                    content="Analyze the provided logistics context and generate a commute plan."
+                ),
+            ]
 
             # Inject Error Context if Retrying
             if state.get("error_log") and state.get("retry_count", 0) > 0:

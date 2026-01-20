@@ -1,9 +1,12 @@
 import asyncio
+import json
+import os
 import sys
+from collections import deque
 from datetime import datetime
-from time import sleep
 
 import httpx
+import redis.asyncio as redis
 from rich import box
 from rich.console import Console
 from rich.layout import Layout
@@ -14,19 +17,57 @@ from rich.text import Text
 
 # Configuration
 API_URL = "http://localhost:8000/v1/stats"
-REFRESH_RATE = 1  # seconds
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REFRESH_RATE = 0.5  # seconds
+MAX_LOGS = 20
 
 console = Console()
+log_queue = deque(maxlen=MAX_LOGS)
 
 
-def fetch_stats():
+async def fetch_stats():
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(API_URL, timeout=0.5)
+            if response.status_code == 200:
+                return response.json().get("metrics", {})
+            return {"error": f"Status {response.status_code}"}
+        except Exception:
+            return {"error": "API Offline"}
+
+
+async def log_subscriber():
+    """Background task to listen for logs from Redis."""
     try:
-        response = httpx.get(API_URL, timeout=0.5)
-        if response.status_code == 200:
-            return response.json().get("metrics", {})
-        return {"error": f"Status {response.status_code}"}
-    except Exception:
-        return {"error": "API Offline"}
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        pubsub = r.pubsub()
+        await pubsub.subscribe("atlas:logs")
+
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    # Format: [timestamp] LEVEL - event
+                    ts = data.get("timestamp", "").split("T")[-1][:8]
+                    level = data.get("level", "info").upper()
+                    event = data.get("event", "")
+
+                    color = "cyan"
+                    if level == "ERROR":
+                        color = "red"
+                    elif level == "WARNING":
+                        color = "yellow"
+
+                    log_text = Text()
+                    log_text.append(f"[{ts}] ", style="dim")
+                    log_text.append(f"{level:7}", style=f"bold {color}")
+                    log_text.append(f" {event}")
+
+                    log_queue.append(log_text)
+                except Exception:
+                    pass
+    except Exception as e:
+        log_queue.append(Text(f"Log Subscriber Error: {str(e)}", style="red"))
 
 
 def make_header() -> Panel:
@@ -49,28 +90,36 @@ def make_metrics_table(stats: dict) -> Panel:
     if "error" in stats:
         table.add_row("Status", "[red]OFFLINE[/red]")
     else:
-        table.add_row("Requests (Total)", str(stats.get("requests:total", 0)))
-        table.add_row("Requests (Success)", str(stats.get("requests:success", 0)))
-        table.add_row(
-            "Requests (Failed)", f"[red]{stats.get('requests:failed', 0)}[/red]"
-        )
-        table.add_row("Cache Hits", str(stats.get("cache:hits", 0)))
+        for k, v in stats.items():
+            name = k.replace("_", " ").title()
+            table.add_row(name, str(v))
 
     return Panel(table, title="System Telemetry", border_style="green")
+
+
+def make_log_panel() -> Panel:
+    log_content = Text()
+    for entry in log_queue:
+        log_content.append(entry)
+        log_content.append("\n")
+
+    return Panel(log_content, title="Live Agent Logs", border_style="yellow")
 
 
 def make_layout() -> Layout:
     layout = Layout()
     layout.split(Layout(name="header", size=3), Layout(name="body"))
     layout["body"].split_row(
-        Layout(name="metrics", ratio=1),
-        Layout(name="logs", ratio=2),  # Placeholder for log stream
+        Layout(name="metrics", ratio=1), Layout(name="logs", ratio=2)
     )
     return layout
 
 
-def run_dashboard():
+async def main():
     layout = make_layout()
+
+    # Start log subscriber in background
+    asyncio.create_task(log_subscriber())
 
     with Live(layout, refresh_per_second=4, screen=True) as live:
         while True:
@@ -78,23 +127,17 @@ def run_dashboard():
             layout["header"].update(make_header())
 
             # 2. Fetch & Update Metrics
-            stats = fetch_stats()
+            stats = await fetch_stats()
             layout["metrics"].update(make_metrics_table(stats))
 
-            # 3. Placeholder Log Panel
-            layout["logs"].update(
-                Panel(
-                    Text("Waiting for log stream... (Not connected)", style="dim"),
-                    title="Live Agent Logs",
-                    border_style="yellow",
-                )
-            )
+            # 3. Update Logs
+            layout["logs"].update(make_log_panel())
 
-            sleep(REFRESH_RATE)
+            await asyncio.sleep(REFRESH_RATE)
 
 
 if __name__ == "__main__":
     try:
-        run_dashboard()
+        asyncio.run(main())
     except KeyboardInterrupt:
         console.print("[bold red]Dashboard Terminated[/bold red]")
