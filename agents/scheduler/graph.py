@@ -7,6 +7,7 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
+from langsmith import traceable
 
 from agents.factory import ModelFactory
 from agents.scheduler.prompts import CLASSIFIER_SYSTEM, REASONER_SYSTEM
@@ -78,6 +79,7 @@ class SchedulerAgent:
         return str(content).strip()
 
     # --- NODE 1: Classify (Flash) ---
+    @traceable(run_type="chain", name="NodeClassify")
     async def node_classify(
         self, state: SchedulerState, config: RunnableConfig
     ) -> Dict[str, Any]:
@@ -87,13 +89,12 @@ class SchedulerAgent:
 
         try:
             now_str = format_now()
-            prompt = CLASSIFIER_SYSTEM.format(current_time=now_str)
             temporal_anchor = f"[TEMPORAL ANCHOR: {now_str}]"
 
             messages = [
-                SystemMessage(content=prompt),
+                SystemMessage(content=CLASSIFIER_SYSTEM.format(current_time=now_str)),
                 HumanMessage(
-                    content=f"{temporal_anchor}\nUser Input: {state.get('raw_query')}\n\nRESPONSE FORMAT: Strictly output valid raw JSON."
+                    content=f"{temporal_anchor}\nUser Query: {state['raw_query']}\n\nRESPONSE FORMAT: Strictly output valid raw JSON."
                 ),
             ]
 
@@ -127,7 +128,12 @@ class SchedulerAgent:
             if not result.user_id:
                 result.user_id = state.get("user_id")
 
-            logger.info("agent.saying", node="classify", result=result.model_dump())
+            logger.info(
+                "agent.saying",
+                node="classify",
+                result=result.model_dump(),
+                user_id=state.get("user_id"),
+            )
 
             if hasattr(raw_msg, "response_metadata"):
                 usage = raw_msg.response_metadata.get("usage", {})
@@ -145,6 +151,7 @@ class SchedulerAgent:
             }
 
     # --- NODE 2: Fetch Context (Parallel Tools) ---
+    @traceable(run_type="chain", name="NodeFetchContext")
     async def node_fetch_context(
         self, state: SchedulerState, config: RunnableConfig
     ) -> Dict[str, Any]:
@@ -158,13 +165,15 @@ class SchedulerAgent:
         flight_num = ctx.flight_number or "UA1"
 
         try:
-            # Asyncio Gather for parallelism (Rule IV)
+            # Asyncio Gather with timeout to prevent LangSmith 'Pending' hangs
             t_task = self.traffic_tool.get_travel_time(origin, destination)
             f_task = self.flight_tool.get_status(
                 flight_num, target_date=ctx.target_arrival_time
             )
 
-            traffic, flight = await asyncio.gather(t_task, f_task)
+            traffic, flight = await asyncio.wait_for(
+                asyncio.gather(t_task, f_task), timeout=10.0
+            )
 
             return {"traffic_data": traffic, "flight_data": flight}
         except Exception as e:
@@ -174,6 +183,7 @@ class SchedulerAgent:
             return {"error_log": [f"Tool Failure: {str(e)}"]}
 
     # --- NODE 3: Reason (Pro) ---
+    @traceable(run_type="chain", name="NodeReason")
     async def node_reason(
         self, state: SchedulerState, config: RunnableConfig
     ) -> Dict[str, Any]:
@@ -231,7 +241,12 @@ class SchedulerAgent:
                     )
                 )
 
-            logger.debug("agent.thinking", node="reason", anchor=temporal_anchor)
+            logger.info(
+                "agent.thinking",
+                node="reason",
+                anchor=temporal_anchor,
+                user_id=state.get("user_id"),
+            )
 
             # Manual JSON Strategy
             raw_msg = await self.pro_model.ainvoke(messages, config=config)
@@ -249,7 +264,12 @@ class SchedulerAgent:
 
             plan = CommutePlan.model_validate(json.loads(json_str))
 
-            logger.info("agent.saying", node="reason", result=plan.model_dump())
+            logger.info(
+                "agent.saying",
+                node="reason",
+                result=plan.model_dump(),
+                user_id=state.get("user_id"),
+            )
 
             if hasattr(raw_msg, "response_metadata"):
                 usage = raw_msg.response_metadata.get("usage", {})

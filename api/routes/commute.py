@@ -1,7 +1,8 @@
 from typing import Any, Dict, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from agents.scheduler.graph import SchedulerAgent
@@ -80,10 +81,10 @@ async def generate_commute_plan(
 
     try:
         # 2. Invoke Agent (Async)
-        config = {
-            "run_name": f"CommutePlan:{request.user_id}",
-            "tags": ["api", "orchestrator"],
-        }
+        config = RunnableConfig(
+            run_name=f"CommutePlan:{request.user_id}",
+            tags=["api", "orchestrator"],
+        )
         final_state = await agent.runner.ainvoke(initial_state, config=config)
 
         # 3. Handle Failure (Self-Healing exhausted)

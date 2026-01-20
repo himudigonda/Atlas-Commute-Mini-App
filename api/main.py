@@ -23,10 +23,7 @@ async def lifespan(app: FastAPI):
     Manages infrastructure connections (startup/shutdown).
     """
     # Startup: Initialize infrastructure connections
-    from engine.telemetry.hub import log_hub
-
     await redis_client.connect()
-    await log_hub.connect()
     yield
     # Shutdown: Cleanup connections
     await redis_client.close()

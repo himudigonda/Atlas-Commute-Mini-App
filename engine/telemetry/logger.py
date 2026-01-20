@@ -19,27 +19,10 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
         log_level: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
     """
 
-    def log_hub_processor(logger, method_name, event_dict):
-        """Passes logs to the Redis Live Hub."""
-        import asyncio
-
-        from engine.telemetry.hub import log_hub
-
-        if log_hub.enabled:
-            # Fire and forget broadcasting
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(log_hub.broadcast(event_dict.copy()))
-            except:
-                pass
-        return event_dict
-
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
-        log_hub_processor,
         structlog.processors.CallsiteParameterAdder(
             {
                 structlog.processors.CallsiteParameter.FILENAME,

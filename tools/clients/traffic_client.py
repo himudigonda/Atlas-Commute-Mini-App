@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
+from langsmith import traceable
 
 from agents.scheduler.state import TrafficMetrics, TrafficStatus
 
@@ -32,6 +33,7 @@ class TrafficClient:
         self.mock_path = Path(__file__).parent.parent / "mocks" / mock_scenario
         self._initialized = True
 
+    @traceable(run_type="tool", name="TrafficTool")
     async def get_travel_time(self, origin: str, destination: str) -> TrafficMetrics:
         """
         Fetch travel metrics. Simulates network latency.

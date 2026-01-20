@@ -2,11 +2,9 @@ import asyncio
 import json
 import os
 import sys
-from collections import deque
-from datetime import datetime
+from typing import Any, Dict
 
 import httpx
-import redis.asyncio as redis
 from rich import box
 from rich.console import Console
 from rich.layout import Layout
@@ -19,167 +17,90 @@ from engine.telemetry.time_utils import format_now
 
 # Configuration
 API_URL = "http://localhost:8000/v1/stats"
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REFRESH_RATE = 0.5  # seconds
-MAX_LOGS = 100
-
-console = Console()
-log_queue = deque(maxlen=MAX_LOGS)
-LOGS_PROCESSED = 0
+REFRESH_RATE = 0.5  # Stable refresh for telemetry
 
 
-async def fetch_stats():
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(API_URL, timeout=0.5)
-            if response.status_code == 200:
-                stats = response.json().get("metrics", {})
-                stats["logs_processed"] = LOGS_PROCESSED
-                return stats
-            return {
-                "error": f"Status {response.status_code}",
-                "logs_processed": LOGS_PROCESSED,
-            }
-        except Exception:
-            return {"error": "API Offline", "logs_processed": LOGS_PROCESSED}
+class DashboardManager:
+    def __init__(self):
+        self.console = Console()
+        self.metrics = {}
+        self.api_status = "Offline"
+        self.layout = self._setup_layout()
 
+    def _setup_layout(self) -> Layout:
+        layout = Layout()
+        layout.split(Layout(name="header", size=3), Layout(name="body"))
+        return layout
 
-async def log_subscriber():
-    """Background task to listen for logs from Redis with reconnection logic."""
-    global LOGS_PROCESSED
-    while True:
-        try:
-            r = redis.from_url(REDIS_URL, decode_responses=True)
-            pubsub = r.pubsub()
-            await pubsub.subscribe("atlas:logs")
-            log_queue.append(Text("Subscribed to atlas:logs", style="dim green"))
+    def make_header(self) -> Panel:
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="center", ratio=1)
+        grid.add_column(justify="right")
 
-            async for message in pubsub.listen():
-                if message["type"] == "message":
-                    LOGS_PROCESSED += 1
-                    try:
-                        data = json.loads(message["data"])
-                        # Format: [timestamp] LEVEL - event
-                        ts = data.get("timestamp", "").split("T")[-1][:8]
-                        level = data.get("level", "info").upper()
-                        event = data.get("event", "")
+        title = Text(
+            "Atlas Orchestrator // System Telemetry", style="bold white on blue"
+        )
+        timestamp = Text(format_now(), style="dim white")
 
-                        color = "cyan"
-                        if level == "ERROR":
-                            color = "red"
-                        elif level == "WARNING":
-                            color = "yellow"
+        grid.add_row(title, timestamp)
+        return Panel(grid, style="white on blue")
 
-                        # SPECIAL RENDERING: Thinking/Saying Boxes
-                        if event in ["agent.thinking", "agent.saying"]:
-                            node = data.get("node", "unknown").upper()
-                            is_thinking = event == "agent.thinking"
-                            icon = "🧠" if is_thinking else "💬"
-                            title = f"{icon} Agent {node} | {'Thinking' if is_thinking else 'Saying'}"
-                            border = "blue" if is_thinking else "magenta"
+    def make_metrics_table(self) -> Panel:
+        table = Table(box=box.SIMPLE_HEAD, expand=True)
+        table.add_column("System Metric", style="cyan")
+        table.add_column("Current Value", justify="right", style="green bold")
 
-                            # Extract content
-                            if is_thinking:
-                                content = data.get("anchor", "")
-                            else:
-                                content = json.dumps(data.get("result", {}), indent=2)
+        table.add_row(
+            "API Gateway",
+            f"[bold {'green' if self.api_status == 'Online' else 'red'}]{self.api_status}[/]",
+        )
 
-                            # Create boxed log
-                            panel = Panel(
-                                Text(content, style="white"),
-                                title=title,
-                                border_style=border,
-                                box=box.ROUNDED,
-                                expand=False,
-                            )
-                            log_queue.append(panel)
-                        else:
-                            # STANDARD LOG LINE
-                            log_text = Text()
-                            log_text.append(f"[{ts}] ", style="dim")
-                            log_text.append(f"{level:7}", style=f"bold {color}")
-                            log_text.append(f" {event}")
-                            log_queue.append(log_text)
-                    except Exception:
-                        pass
-        except Exception as e:
-            log_queue.append(Text(f"Connection Lost: {str(e)}", style="bold red"))
-            await asyncio.sleep(2)  # Backoff before reconnect
+        # Spacer
+        table.add_row("", "")
 
+        if self.metrics:
+            for k, v in self.metrics.items():
+                name = k.replace("_", " ").title()
+                table.add_row(name, str(v))
+        else:
+            table.add_row("[dim]Waiting for data...[/dim]", "")
 
-def make_header() -> Panel:
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="center", ratio=1)
-    grid.add_column(justify="right")
+        return Panel(table, title="Live Performance Metrics", border_style="green")
 
-    title = Text("Atlas Orchestrator // Live Control", style="bold white on blue")
-    timestamp = Text(format_now(), style="dim white")
+    async def fetch_api_stats(self):
+        """Polls the API for metric snapshots."""
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(API_URL, timeout=1.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    self.metrics = data.get("metrics", {})
+                    self.api_status = "Online"
+                else:
+                    self.api_status = f"Error {response.status_code}"
+            except Exception:
+                self.api_status = "Offline"
 
-    grid.add_row(title, timestamp)
-    return Panel(grid, style="white on blue")
+    async def run(self):
+        """Main execution loop for the TUI."""
+        with Live(self.layout, refresh_per_second=2, screen=True) as live:
+            while True:
+                # 1. Update Layout Components Directly
+                self.layout["header"].update(self.make_header())
+                self.layout["body"].update(self.make_metrics_table())
 
+                # 2. Polling (Non-blocking)
+                await self.fetch_api_stats()
 
-def make_metrics_table(stats: dict) -> Panel:
-    table = Table(box=box.SIMPLE_HEAD, expand=True)
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", justify="right", style="green bold")
-
-    if stats.get("error") == "API Offline":
-        table.add_row("Status", "[red]API OFFLINE[/red]")
-        table.add_row("Logs RX", str(stats.get("logs_processed", 0)))
-    else:
-        for k, v in stats.items():
-            if k == "error":
-                continue
-            name = k.replace("_", " ").title()
-            table.add_row(name, str(v))
-
-    return Panel(table, title="System Telemetry", border_style="green")
-
-
-def make_log_panel() -> Panel:
-    # If the queue has Panels, they will be rendered as strings or we handle carefully
-    # actually rich handles it if we append correctly, but the queue has mixture of Text and Panel
-    # Let's iterate and build a Group if needed, but Panel expects a Renderable
-    from rich.console import Group
-
-    return Panel(
-        Group(*list(log_queue)), title="Live Agent Logs", border_style="yellow"
-    )
-
-
-def make_layout() -> Layout:
-    layout = Layout()
-    layout.split(Layout(name="header", size=3), Layout(name="body"))
-    layout["body"].split_row(
-        Layout(name="metrics", ratio=1), Layout(name="logs", ratio=2)
-    )
-    return layout
-
-
-async def main():
-    layout = make_layout()
-
-    # Start log subscriber in background
-    asyncio.create_task(log_subscriber())
-
-    with Live(layout, refresh_per_second=4, screen=True) as live:
-        while True:
-            # 1. Update Header
-            layout["header"].update(make_header())
-
-            # 2. Fetch & Update Metrics
-            stats = await fetch_stats()
-            layout["metrics"].update(make_metrics_table(stats))
-
-            # 3. Update Logs
-            layout["logs"].update(make_log_panel())
-
-            await asyncio.sleep(REFRESH_RATE)
+                await asyncio.sleep(REFRESH_RATE)
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        manager = DashboardManager()
+        asyncio.run(manager.run())
     except KeyboardInterrupt:
-        console.print("[bold red]Dashboard Terminated[/bold red]")
+        pass
+    except Exception as e:
+        print(f"Fatal Error: {e}")
+        sys.exit(1)

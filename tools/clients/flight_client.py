@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
+from langsmith import traceable
 
 from agents.scheduler.state import FlightMetrics, FlightStatus
 
@@ -33,6 +34,7 @@ class FlightClient:
         self.mock_path = Path(__file__).parent.parent / "mocks" / mock_scenario
         self._initialized = True
 
+    @traceable(run_type="tool", name="FlightTool")
     async def get_status(
         self, flight_number: str, target_date: Optional[datetime] = None
     ) -> FlightMetrics:
