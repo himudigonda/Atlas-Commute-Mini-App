@@ -1,60 +1,32 @@
 # Atlas Commute Orchestrator 🌍
 
-> A high-velocity, agentic RAG system that proactively manages commute logistics using Gemini 3 Flash/Pro and LangGraph.
+> A production-hardened, agentic RAG system that proactively manages commute logistics using Gemini 2.0 and LangGraph.
 
-## 🏗 Architecture (Vertical Slice)
-
-Atlas uses a **"Thin Router, Fat Logic"** pattern:
-1.  **API Layer (FastAPI):** Stateless entry point.
-2.  **Agent Core (LangGraph):** Dual-model reasoning engine.
-    *   *Flash:* Fast intent extraction & tool routing.
-    *   *Pro:* Complex decision making (Time buffers, Risk analysis).
-3.  **State Layer (Redis):** Persists agent memory and system telemetry.
-4.  **Tools:** Mock-first integrations for Traffic and Flight data.
+## 🏗 Architecture
+- **API**: FastAPI (Stateless, Lifespan managed).
+- **Agent**: LangGraph (Dual-model tiering: 2.0 Flash/Pro).
+- **Queue**: Celery + Redis (Background monitor).
+- **Telemetry**: Redis atomic counters + Rich Dashboard.
 
 ## 🚀 Quick Start
+1. **Setup**: `make setup`
+2. **Local Dev**: `make dev`
+3. **Observability**: `make dashboard` (in separate terminal)
 
-### Prerequisites
-*   Python 3.11+
-*   `uv` (Package Manager)
-*   Redis (Local or Docker)
-*   Google Gemini API Key
+## 🛡️ Hardening & Security
+- **Python 3.12**: Optimized for high-concurrency `asyncio`.
+- **Non-Root Images**: Secure Docker runtime using `atlas` user.
+- **Self-Healing**: Automatic retry logic for LLM hallucinations.
+- **Singleton Clients**: Prevent socket exhaustion in high-traffic scenarios.
 
-### 1. Setup
-```bash
-# Install dependencies
-make setup
-
-# Create .env file
-echo "GOOGLE_API_KEY=your_key_here" > .env
-```
-
-### 2. Run Local
-```bash
-# Start the API
-make dev
-
-# In a separate terminal, launch the dashboard
-make dashboard
-```
-
-### 3. Test
-```bash
-# Run the full suite
-make test
-```
-
-## 🛡️ Production & Security
-*   **Non-Root Runtime:** Dockerfile creates an `atlas` user.
-*   **Type Safety:** 100% Pydantic V2 coverage.
-*   **Self-Healing:** Agents retry automatically upon JSON parsing errors.
-
-## 📊 Observability
-*   **Metrics:** Stored in Redis, accessible via `/v1/stats`.
-*   **Logs:** Structured JSON in prod, `Rich` pretty-print in dev.
+## 📊 Environment
+Requires:
+- `GOOGLE_API_KEY`
+- `REDIS_URL`
 
 ## 📁 Project Structure
-*   `agents/`: LangGraph definitions & Prompts.
-*   `api/`: FastAPI routes & DTOs.
-*   `engine/`: Redis, Logging, Metrics.
-*   `tools/`: Mock clients for testing.
+- `agents/`: Core reasoning and prompts.
+- `tools/`: Singleton API clients.
+- `engine/`: Infrastructure (Redis, Metrics, Queue).
+- `api/`: FastAPI routers and schemas.
+- `scripts/`: Operational tools (Dashboard).

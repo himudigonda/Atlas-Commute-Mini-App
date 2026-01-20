@@ -1,51 +1,22 @@
 # STAGE 1: Builder
-# Use astral-sh/uv for lightning-fast dependency resolution
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
-
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
-
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
-# Copy dependency definitions
-COPY pyproject.toml uv.lock ./
-
-# Sync dependencies to a specific virtual environment path
-# --frozen ensures we don't accidentally upgrade packages without updating lockfile
-RUN uv sync --frozen --no-install-project --no-dev
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
 
 # STAGE 2: Runtime
-# Use a minimal slim image for production
-FROM python:3.11-slim-bookworm
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH" \
-    MOCK_MODE=false
-
+FROM python:3.12-slim-bookworm
 WORKDIR /app
-
-# Create a non-root user (Rule 14)
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 RUN groupadd -r atlas && useradd -r -g atlas atlas
-
-# Copy the virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
-
-# Copy application code
 COPY . .
-
-# Change ownership to non-root user
 RUN chown -R atlas:atlas /app
-
-# Switch context
 USER atlas
-
-# Expose API port
 EXPOSE 8000
-
-# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
-
-# Launch with Uvicorn (production settings)
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

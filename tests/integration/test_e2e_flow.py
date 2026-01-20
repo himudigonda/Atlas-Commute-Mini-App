@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,8 +13,6 @@ client = TestClient(app)
 async def test_end_to_end_flow():
     """
     Simulates a full request lifecycle ensuring all components wire together.
-    Uses 'MOCK_MODE=true' (default in clients) to avoid real tool API costs.
-    Mocks the LLM calls to provide deterministic output.
     """
 
     # 1. Setup Mocks for the Heavy Lifting (LLM)
@@ -34,19 +32,29 @@ async def test_end_to_end_flow():
         notification_message="Leave NOW.",
     )
 
-    # Patch the Factory to return mocks that return our Pydantic objects
+    # Patch the Factory to return mocks
     with (
         patch("agents.factory.ModelFactory.get_fast") as mock_fast,
         patch("agents.factory.ModelFactory.get_pro") as mock_pro,
     ):
 
-        # Mock Flash (Extraction)
-        mock_fast.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        # Mock Model instance
+        fast_instance = MagicMock()
+        pro_instance = MagicMock()
+        mock_fast.return_value = fast_instance
+        mock_pro.return_value = pro_instance
+
+        # Mock ainvoke for token tracking
+        mock_response = MagicMock()
+        mock_response.response_metadata = {"usage": {"total_tokens": 10}}
+        fast_instance.ainvoke = AsyncMock(return_value=mock_response)
+        pro_instance.ainvoke = AsyncMock(return_value=mock_response)
+
+        # Mock structured output
+        fast_instance.with_structured_output.return_value.ainvoke = AsyncMock(
             return_value=mock_context
         )
-
-        # Mock Pro (Reasoning)
-        mock_pro.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        pro_instance.with_structured_output.return_value.ainvoke = AsyncMock(
             return_value=mock_plan
         )
 
@@ -58,11 +66,6 @@ async def test_end_to_end_flow():
         assert response.status_code == 200
         data = response.json()
 
-        if not data["success"]:
-            print(f"DEBUG: API Error: {data.get('error')}")
-
         assert data["success"] is True
         assert data["plan"]["recommended_action"] == "nudge_leave_now"
-
-        # Verify Trace ID matches User ID (MVP Logic)
         assert data["trace_id"] == "test_e2e"

@@ -4,29 +4,40 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from agents.scheduler.state import TrafficMetrics, TrafficStatus
 import structlog
 
+from agents.scheduler.state import TrafficMetrics, TrafficStatus
+
 logger = structlog.get_logger()
+
 
 class TrafficClient:
     """
     Simulates Google Routes API.
-    Modes:
-    - MOCK: Reads from local JSON to simulate specific traffic conditions.
-    - REAL: (Placeholder) Would hit Google Routes API.
+    Implemented as a Singleton to prevent socket exhaustion.
     """
-    
+
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(TrafficClient, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, mock_scenario: str = "traffic_heavy.json"):
+        # Ensure init only runs once for the singleton
+        if hasattr(self, "_initialized"):
+            return
         self.mock_mode = os.getenv("MOCK_MODE", "true").lower() == "true"
         self.mock_path = Path(__file__).parent.parent / "mocks" / mock_scenario
+        self._initialized = True
 
     async def get_travel_time(self, origin: str, destination: str) -> TrafficMetrics:
         """
         Fetch travel metrics. Simulates network latency.
         """
         logger.info("tool.traffic.start", origin=origin, destination=destination)
-        
+
         # Simulate network I/O latency
         await asyncio.sleep(0.5)
 
@@ -41,14 +52,16 @@ class TrafficClient:
                 raise FileNotFoundError(f"Mock file not found: {self.mock_path}")
 
             # Async file reading to avoid blocking event loop
-            content = await asyncio.to_thread(self.mock_path.read_text, encoding="utf-8")
+            content = await asyncio.to_thread(
+                self.mock_path.read_text, encoding="utf-8"
+            )
             data = json.loads(content)
-            
+
             # Pydantic validation (The Contract)
             metrics = TrafficMetrics.model_validate(data)
             logger.info("tool.traffic.success", status=metrics.status)
             return metrics
-            
+
         except Exception as e:
             logger.error("tool.traffic.failed", error=str(e))
             # Fallback for resilience
@@ -57,7 +70,7 @@ class TrafficClient:
                 duration_seconds=0,
                 traffic_delay_seconds=0,
                 status=TrafficStatus.CLEAR,
-                route_summary="Unknown (Error)"
+                route_summary="Unknown (Error)",
             )
 
     async def _get_real_data(self, origin: str, destination: str) -> TrafficMetrics:

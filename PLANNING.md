@@ -1,28 +1,21 @@
-# [Project Name]
+# Atlas Commute Orchestrator - Deployment Plan
 
-## 1. What are we actually solving?
-* **The Problem:** [What is the user's pain?]
-* **What kicks this off?:** [The input or event that starts the code]
-* **When are we done?:** [Minimum requirements to complete]
-* **When are we satisfied?:** [All requirements to be met]
+## 🎯 The Problem
+Fragmented travel data (traffic spikes, flight delays) leads to missed connections and poor user experience. Current solutions are reactive; Atlas is proactive.
 
-## 2. The Data (What do we need?)
-* **The Input:** [Raw request json contract]
-* **PROCESSING STATE:** [What do the N agents need to see and do?]
-* **The Final Answer:** [Raw response json contract]
+## 🏗 Architecture (Vertical Slice)
+- **API (FastAPI)**: Thin entry point.
+- **Brain (LangGraph)**: Multi-agent reasoning (Flash for extraction, Pro for deep logic).
+- **State (Redis)**: Cross-worker persistence and telemetry.
+- **Data (SchedulerState)**: Strict Pydantic-backed contracts.
 
-## 3. The Agentic Graph Orchestration
-* **Router (Flash):** Splits the work.
-* **The Parallel Workers (N-Agents):** - Agent 1: [Task 1]
-    - Agent 2: [Task 2]
-    - Agent 3: [Task 3]
-* **The Fixer (Pro):** Compiles the parallel results and decides the move.
-* **Self-Correction:** [How we fix it if an agent hallucinates]
+## 🔄 The Graph Logic
+- **Cyclic Control**: Using `retry` edges for LLM self-healing.
+- **Parallel Execution**: Tool fetching happens concurrently.
+- **Structured Output**: Enforced Pydantic schemas for all agent decisions.
 
-## 4. The Tech (Infrastructure)
-* **Speed:** Using asyncio.gather to run agents simultaneously.
-* **Storage:** Redis for caching so we don't repeat expensive work.
-* **Observability:** Logging every step with Rich so we can see the concurrent flow.
-* **Tracing:** Using LangSmith to trace the flow of the agents.
-* **Testing:** Using pytest to test the flow of the agents.
-* **Error Handling:** Using try-except blocks to handle errors gracefully.
+## 🚀 Scaling Path (Future)
+1. **Redis Distributed Locking**: Implement in `engine/queue/tasks.py` to prevent duplicate agent execution for the same user.
+2. **Persistent Storage**: Migrate from mock JSONs to **Postgres/PostGIS** for realistic geo-spatial travel analysis.
+3. **Observability**: Integrate **LangSmith** for deep trace analysis and cost optimization.
+4. **Auth**: Add enterprise OAuth2/OIDC layers for multi-tenant isolation.
