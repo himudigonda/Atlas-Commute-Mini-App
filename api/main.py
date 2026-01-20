@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,11 +10,26 @@ from engine.telemetry.logger import setup_logging
 # 1. Setup Telemetry (Global)
 setup_logging(json_logs=False, log_level="INFO")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan event handler for FastAPI.
+    Manages infrastructure connections (startup/shutdown).
+    """
+    # Startup: Initialize infrastructure connections
+    await redis_client.connect()
+    yield
+    # Shutdown: Cleanup connections
+    await redis_client.close()
+
+
 # 2. Initialize App
 app = FastAPI(
     title="Atlas Commute Orchestrator",
     version="0.1.0",
     description="Agentic RAG system for proactive commute monitoring.",
+    lifespan=lifespan,
 )
 
 # 3. Middleware
@@ -26,18 +43,6 @@ app.add_middleware(
 # 4. Register Routes
 app.include_router(commute.router)
 app.include_router(stats.router)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize infrastructure connections."""
-    await redis_client.connect()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup connections."""
-    await redis_client.close()
 
 
 @app.get("/health", tags=["System"])

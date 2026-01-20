@@ -1,22 +1,24 @@
 import logging
 import sys
+
 import structlog
-from structlog.types import Processor
 from rich.console import Console
 from rich.logging import RichHandler
+from structlog.types import Processor
 
 # Global Console for Rich outputs
 console = Console()
 
+
 def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
     """
     Configures the application-wide logging strategy.
-    
+
     Args:
         json_logs: If True, outputs JSON for ELK/Datadog. If False, uses Rich.
         log_level: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
     """
-    
+
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
@@ -39,14 +41,11 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO") -> None:
     else:
         # Development: Rich output
         processors = shared_processors + [
-            structlog.dev.ConsoleRenderer(colors=True, pad_event=20),
+            structlog.dev.ConsoleRenderer(colors=True, pad_event_to=20),
         ]
         # RichHandler handles the formatting
         handler = RichHandler(
-            console=console, 
-            rich_tracebacks=True,
-            show_path=False,
-            markup=True
+            console=console, rich_tracebacks=True, show_path=False, markup=True
         )
 
     structlog.configure(
