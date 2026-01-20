@@ -75,6 +75,38 @@ class SchedulerAgent:
 
         return await self.runner.ainvoke(state, config=config)
 
+    async def astream(self, state: SchedulerState, config: RunnableConfig):
+        """Streams agent events for real-time UI updates (SSE)."""
+        user_id = state.get("user_id", "unknown")
+        if not config.get("metadata"):
+            config["metadata"] = {}
+        config["metadata"]["user_id"] = user_id
+
+        # Use astream_events v2 for granular control
+        async for event in self.runner.astream_events(
+            state, config=config, version="v2"
+        ):
+            kind = event["event"]
+            name = event["name"]
+
+            # 1. Node Start Events
+            if kind == "on_chain_start" and name in [
+                "classify",
+                "fetch_context",
+                "reason",
+            ]:
+                yield {"type": "node_start", "node": name}
+
+            # 2. Token Streaming (from the reasoning node)
+            if kind == "on_chat_model_stream" and name == "ChatGoogleGenerativeAI":
+                content = event["data"]["chunk"].content
+                if content:
+                    yield {"type": "token", "content": content}
+
+            # 3. Final State Chunks
+            if kind == "on_chain_end" and name == "LangGraph":
+                yield {"type": "final_state", "output": event["data"]["output"]}
+
     def _extract_content(self, msg) -> str:
         """Robustly extracts string content from a message, handling lists/parts."""
         content = getattr(msg, "content", "")
@@ -148,11 +180,17 @@ class SchedulerAgent:
                 user_id=state.get("user_id"),
             )
 
-            if hasattr(raw_msg, "response_metadata"):
-                usage = raw_msg.response_metadata.get("usage", {})
-                await metrics.increment(
-                    MetricKey.TOKENS_USED, usage.get("total_tokens", 0)
+            # Token Tracking (Hardened for Gemini/LangChain V2)
+            token_count = 0
+            if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+                token_count = raw_msg.usage_metadata.get("total_tokens", 0)
+            elif hasattr(raw_msg, "response_metadata"):
+                token_count = raw_msg.response_metadata.get("usage", {}).get(
+                    "total_tokens", 0
                 )
+
+            if token_count > 0:
+                await metrics.increment(MetricKey.TOKENS_USED, token_count)
 
             return {"user_context": result, "retry_count": 0}
 
@@ -284,11 +322,17 @@ class SchedulerAgent:
                 user_id=state.get("user_id"),
             )
 
-            if hasattr(raw_msg, "response_metadata"):
-                usage = raw_msg.response_metadata.get("usage", {})
-                await metrics.increment(
-                    MetricKey.TOKENS_USED, usage.get("total_tokens", 0)
+            # Token Tracking (Hardened for Gemini/LangChain V2)
+            token_count = 0
+            if hasattr(raw_msg, "usage_metadata") and raw_msg.usage_metadata:
+                token_count = raw_msg.usage_metadata.get("total_tokens", 0)
+            elif hasattr(raw_msg, "response_metadata"):
+                token_count = raw_msg.response_metadata.get("usage", {}).get(
+                    "total_tokens", 0
                 )
+
+            if token_count > 0:
+                await metrics.increment(MetricKey.TOKENS_USED, token_count)
 
             return {"plan": plan, "retry_count": 0}
 

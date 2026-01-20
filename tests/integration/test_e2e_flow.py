@@ -49,11 +49,13 @@ async def test_end_to_end_flow():
 
         mock_fast_msg = MagicMock()
         mock_fast_msg.content = json.dumps(mock_context_json)
+        mock_fast_msg.usage_metadata = {"total_tokens": 10}
         mock_fast_msg.response_metadata = {"usage": {"total_tokens": 10}}
         fast_instance.ainvoke = AsyncMock(return_value=mock_fast_msg)
 
         mock_pro_msg = MagicMock()
         mock_pro_msg.content = json.dumps(mock_plan_json)
+        mock_pro_msg.usage_metadata = {"total_tokens": 15}
         mock_pro_msg.response_metadata = {"usage": {"total_tokens": 15}}
         pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 

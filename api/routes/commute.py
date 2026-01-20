@@ -1,8 +1,10 @@
+import json
 import time
 from typing import Any, Dict, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from pydantic import BaseModel, Field
@@ -125,3 +127,58 @@ async def generate_commute_plan(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal system error during planning.",
         )
+
+
+@router.post(
+    "/plan/stream",
+    summary="Generate a commute plan with real-time token streaming",
+)
+async def generate_commute_plan_stream(
+    request: PlanRequest, agent: SchedulerAgent = Depends(get_agent)
+):
+    """
+    Streams the agent's reasoning process and final plan via SSE.
+    Reduces TTFT by yielding tokens immediately.
+    """
+
+    async def event_generator():
+        log = logger.bind(user_id=request.user_id, route="plan_stream")
+        log.info("api.stream_request_received", query=request.query)
+
+        await metrics.increment(MetricKey.REQUESTS_TOTAL)
+
+        initial_state = SchedulerState(
+            user_id=request.user_id,
+            raw_query=request.query,
+            user_context=None,
+            traffic_data=None,
+            flight_data=None,
+            plan=None,
+            error_log=[],
+            retry_count=0,
+            execution_trace=[],
+        )
+
+        config = RunnableConfig(
+            run_name=f"CommutePlanStream:{request.user_id}",
+            tags=["api", "streaming"],
+            metadata={"user_id": request.user_id, "client_id": "fastapi_stream"},
+        )
+
+        agent_start = time.time()
+
+        try:
+            async for event in agent.astream(initial_state, config=config):
+                # Format as SSE event
+                yield f"data: {json.dumps(event)}\n\n"
+
+            agent_latency = int((time.time() - agent_start) * 1000)
+            await metrics.set(MetricKey.AGENT_LATENCY_MS, agent_latency)
+            await metrics.increment(MetricKey.REQUESTS_SUCCESS)
+
+        except Exception as e:
+            await metrics.increment(MetricKey.REQUESTS_FAILED)
+            log.error("api.stream_exception", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

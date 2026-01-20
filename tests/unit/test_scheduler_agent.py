@@ -63,11 +63,13 @@ async def test_scheduler_agent_happy_path():
         # Mock ainvoke
         mock_fast_msg = MagicMock()
         mock_fast_msg.content = json.dumps(mock_context)
+        mock_fast_msg.usage_metadata = {"total_tokens": 10}
         mock_fast_msg.response_metadata = {"usage": {"total_tokens": 10}}
         fast_instance.ainvoke = AsyncMock(return_value=mock_fast_msg)
 
         mock_pro_msg = MagicMock()
         mock_pro_msg.content = json.dumps(mock_plan)
+        mock_pro_msg.usage_metadata = {"total_tokens": 15}
         mock_pro_msg.response_metadata = {"usage": {"total_tokens": 15}}
         pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 
@@ -138,6 +140,7 @@ async def test_self_healing_retry():
                 "flight_number": "UA111",
             }
         )
+        mock_fast_msg_ok.usage_metadata = {"total_tokens": 10}
         mock_fast_msg_ok.response_metadata = {"usage": {"total_tokens": 10}}
 
         fast_instance.ainvoke = AsyncMock(
@@ -153,6 +156,7 @@ async def test_self_healing_retry():
                 "reasoning_trace": "ok",
             }
         )
+        mock_pro_msg.usage_metadata = {"total_tokens": 5}
         mock_pro_msg.response_metadata = {"usage": {"total_tokens": 5}}
         pro_instance.ainvoke = AsyncMock(return_value=mock_pro_msg)
 
