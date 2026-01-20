@@ -1,30 +1,86 @@
+import os
+import json
+from typing import Optional, Type, TypeVar
+from pydantic import BaseModel
 import redis.asyncio as redis
 import structlog
-import os
 
 logger = structlog.get_logger()
 
-class CacheService:
-    def __init__(self):
-        self.client = None
-        self.enabled = False
-        self._memory = {}
+# Generic type for Pydantic models
+T = TypeVar("T", bound=BaseModel)
 
-    async def init(self):
-        url = os.getenv("REDIS_URL", "redis://localhost:6379")
+class RedisService:
+    """
+    Singleton wrapper for Redis with automatic Pydantic serialization.
+    Implements Rule 11 (Caching) and Rule 15 (Resilience).
+    """
+    _instance: Optional["RedisService"] = None
+
+    def __init__(self) -> None:
+        self.client: Optional[redis.Redis] = None
+        self.enabled: bool = False
+        self._url: str = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+    @classmethod
+    def get_instance(cls) -> "RedisService":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    async def connect(self) -> None:
+        """Initializes the Redis connection pool."""
         try:
-            self.client = redis.from_url(url, decode_responses=True)
-            await self.client.ping()
-            self.enabled = True
-            logger.info("cache.connected", provider="redis")
+            self.client = redis.from_url(
+                self._url, 
+                encoding="utf-8", 
+                decode_responses=True,
+                socket_connect_timeout=2.0  # Fail fast
+            )
+            if self.client:
+                await self.client.ping()
+                self.enabled = True
+                logger.info("redis.connected", url=self._url)
         except Exception as e:
-            logger.warning("cache.offline", error=str(e), fallback="in_memory")
+            self.enabled = False
+            logger.error("redis.connection_failed", error=str(e), fallback="disabled")
 
-    async def get(self, key: str):
-        return await self.client.get(key) if self.enabled else self._memory.get(key)
+    async def close(self) -> None:
+        if self.client:
+            await self.client.close()
+            logger.info("redis.closed")
 
-    async def set(self, key: str, val: str, ttl=3600):
-        if self.enabled: await self.client.set(key, val, ex=ttl)
-        else: self._memory[key] = val
+    async def set_model(self, key: str, model: BaseModel, ttl: int = 3600) -> bool:
+        """
+        Stores a Pydantic model as JSON.
+        """
+        if not self.enabled or not self.client:
+            return False
+        try:
+            # Pydantic V2 serialization
+            data = model.model_dump_json()
+            await self.client.set(key, data, ex=ttl)
+            return True
+        except Exception as e:
+            logger.error("redis.set_error", key=key, error=str(e))
+            return False
 
-cache = CacheService()
+    async def get_model(self, key: str, model_cls: Type[T]) -> Optional[T]:
+        """
+        Retrieves JSON and validates it against the Pydantic schema.
+        Returns None if key missing or validation fails.
+        """
+        if not self.enabled or not self.client:
+            return None
+        try:
+            data = await self.client.get(key)
+            if not data:
+                return None
+            # Pydantic V2 validation
+            return model_cls.model_validate_json(data)
+        except Exception as e:
+            logger.error("redis.get_error", key=key, error=str(e))
+            return None
+
+# Singleton export
+redis_client = RedisService.get_instance()
